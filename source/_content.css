@@ -1,0 +1,244 @@
+/* this is the outline highlight when user hovers element while recording */
+.gpal-highlighted-element {
+    outline: 2px solid rgb(203, 0, 0) !important;
+}
+
+.gpal-box-shadow-line-element {
+    box-shadow: 0 0 5px 5px rgba(178, 0, 255, .4);
+}
+.gpal-dashed-line-element {
+    outline: 5px dashed rgb(255 0 0) !important;
+    background-color: lightblue !important;
+}
+.gpal-dashed-line-element-thin-blue {
+    outline: 2px dashed rgb(100 100 255) !important;
+}
+
+
+.gpaltoast-container {
+    position: fixed;
+    display: flex;
+    align-items: flex-end;
+    z-index: 9999;
+    overflow-y: auto;
+}
+
+    .gpaltoast-container.top-right {
+        top: 16px;
+        right: 16px;
+        flex-direction: column;
+    }
+
+    .gpaltoast-container.bottom-left {
+        bottom: 16px;
+        left: 16px;
+        flex-direction: column-reverse;
+    }
+
+    .gpaltoast-container.top-left {
+        top: 16px;
+        left: 16px;
+        flex-direction: column;
+    }
+
+    .gpaltoast-container.bottom-right {
+        bottom: 16px;
+        right: 16px;
+        flex-direction: column-reverse;
+    }
+
+    .gpaltoast-container.bottom-center {
+        bottom: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        flex-direction: column-reverse;
+    }
+
+    .gpaltoast-container.top-center {
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        flex-direction: column;
+    }
+
+    .gpaltoast-container.hidden {
+        display: none;
+    }
+
+.gpaltoast {
+    display: grid;
+    grid-template-columns: auto 1fr auto; /* Adjust column sizes as needed */
+    align-items: center;
+    background-color: #00ffff;
+    color: #000;
+    padding: 12px 16px;
+    border-radius: 4px;
+    font-family: Arial, sans-serif;
+    font-size: 16px;
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+    margin-bottom: 8px;
+    margin-left: 0px;
+    box-sizing: border-box;
+}
+
+    .gpaltoast.fade-in {
+        opacity: 1;
+    }
+
+    .gpaltoast.fade-out {
+        opacity: 0;
+        pointer-events: none;
+    }
+
+.gpaltoast-title {
+    font-size: 16px;
+    font-weight: bold;
+    margin-bottom: 4px;
+}
+
+.gpaltoast-message {
+    font-size: 14px;
+    margin-bottom: 4px;
+    word-wrap: break-word;
+    grid-column: 2 / 4; /* Adjust grid column range as needed */
+}
+
+.gpaltoast-data {
+    font-size: 10px;
+    margin-bottom: 4px;
+    max-width: 250px;
+    word-wrap: break-word;
+    grid-column: 2 / 4; /* Adjust grid column range as needed */
+}
+
+.gpaltoast-strong {
+    font-size: 14px;
+    font-weight: bolder;
+    margin-bottom: 4px;
+}
+
+.gpaltoast-close {
+    cursor: pointer;
+}
+
+.gpaltoast-close-container {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+    align-self: start; /* Position the container at the top */
+    padding: 2px;
+    margin-top: -10px; /* Move up by 3 pixels */
+    margin-right: -10px; /* Move right by 3 pixels */
+}
+
+.gpaltoast-icon {
+    width: 48px; /* Set the desired width of the icon */
+    height: 48px; /* Set the desired height of the icon */
+    margin-right: 10px; /* Adjust the right margin as needed */
+}
+
+.gpaltoast-content-container {
+    display: flex;
+    flex-direction: column;
+}
+
+/* GPAL popup menu - context menu replacement */
+.gpal-popup-menu {
+    position: relative;
+    z-index: 99999;
+    background-color: #fff;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+    padding: 0;
+    margin: 0;
+    list-style: none !important;
+}
+
+    .gpal-popup-menu li {
+        padding: 0px;
+        cursor: pointer;
+        height: 20px;
+        color: black;
+    }
+
+        .gpal-popup-menu li:hover {
+            background-color: #f1f1f1;
+            height: 20px;
+        }
+
+            .gpal-popup-menu li:hover > div {
+                display: block;
+                outline: none;
+                height: 0px;
+                border: none;
+            }
+
+            .gpal-popup-menu li:hover > div > ul {
+                display: block;
+            }
+
+    .gpal-popup-menu ul {
+        position: relative;
+        left: 100%;
+        top: 0;
+        display: none;
+        padding: 0;
+        margin: 0;
+        top: -20px;
+        height: 0;
+    }
+
+
+.gpal-menuContent {
+    background-color: #f9f9f9;
+    border: 1px solid #666;
+    min-width: 120px;
+    height: 20px;
+}
+
+.gpal-popup-container {
+    position: absolute;
+    list-style-type: none !important;
+    background-color: white;
+    border: 1px solid #666;
+    padding: 0px;
+    z-index: 99999;
+    margin: 0;
+    display: none;
+}
+    .gpal-popup-container .dark-mode li {
+        background-color: #333; /* Dark background color */
+        color: #fff; /* Light text color */
+    }
+
+    .gpal-popup-container .dark-mode li:hover {
+        background-color: #666; /* Dark background color */
+        color: #fff; /* Light text color */
+    }
+/*    .gpal-popup-container:hover ul {
+        list-style-type: none;
+        margin: 0;
+        padding: 0;
+        cursor: pointer;
+        color: #333;
+    }
+
+    .gpal-popup-container:hover li {
+        margin: 0;
+        cursor: pointer;
+        color: #333;
+    }
+
+    .gpal-popup-container ul {
+        list-style-type: none;
+        padding: 0;
+        margin: 0;
+        cursor: pointer;
+    }
+
+    .gpal-popup-container li {
+        list-style-type: none;
+        padding: 5px;
+        margin: 0;
+        cursor: pointer;
+    }*/

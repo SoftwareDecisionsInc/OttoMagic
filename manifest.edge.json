@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "OttoMagic - Browser Control via GPAL's REST API",
+  "version": "1.0.0.0",
+  "description": "Control your real browser with HTTP requests from any language, no driver needed. Plays back OttoMatic and GPAL workflows.",
+  "icons": {
+    "16": "images/robot-16.png",
+    "48": "images/robot-48.png",
+    "128": "images/robot-128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "images/robot-16.png",
+      "48": "images/robot-48.png",
+      "128": "images/robot-128.png"
+    },
+    "default_popup": "source/_popup.html",
+    "default_title": "Magic"
+  },
+  "background": {
+    "service_worker": "source/_background.js"
+  },
+  "content_scripts": [
+    {
+      "all_frames": true,
+      "css": [
+        "source/_content.css"
+      ],
+      "js": [
+        "source/Globals.js",
+        "source/Settings.js",
+        "source/contentHelper.js",
+        "source/Messaging.js",
+        "source/SelectorSet.js",
+        "source/Constants.js",
+        "source/Persistence.js",
+        "source/_content.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ],
+      "match_about_blank": true
+    }
+  ],
+  "permissions": [
+    "activeTab",
+    "browsingData",
+    "clipboardWrite",
+    "contextMenus",
+    "cookies",
+    "declarativeNetRequest",
+    "debugger",
+    "downloads",
+    "nativeMessaging",
+    "scripting",
+    "storage",
+    "tabs",
+    "userScripts",
+    "webRequest",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ]
+}

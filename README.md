@@ -7,7 +7,7 @@ signed-in browser profile through a REST API.
 
 ## This repository
 
-This is the read-only public release mirror of OttoMagic version 1.0.0.0, taken from release commit `646ab48` of
+This is the read-only public release mirror of OttoMagic version 1.0.0.2, taken from release commit `3ec2476` of
 the private OttoMatic browser extension repository. Development happens privately, and pull requests are not accepted here.
 
 ## License

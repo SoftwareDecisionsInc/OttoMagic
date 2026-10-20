@@ -7,7 +7,7 @@ Globals.currentContentID = 'popup';	// Math.random().toString(36).substring(2);
 const body = document.querySelector('#body');
 
 function init() {
-	Persistence.reloadPersistence(true).then(() => {
+	Persistence.reloadPersistence().then(() => {
 		if (true == persistence.settings.darkMode)
 			darkModeOn();
 		else
@@ -32,6 +32,7 @@ function init() {
 
 		updateViewState();
 		updateSettings();
+		updateInjectedScripts();   // the popup can reopen on the settings view, which shows this panel
 		updateAuditLog();
 		updateErrorLog();
 		updateServerPort();
@@ -44,7 +45,13 @@ function init() {
 				'OttoMagic v' + manifest.version + '<br>' +
 				message;
 		});
-	});
+	}).catch(showFatalError);
+
+	// The error banner starts hidden. Show it if the popup has not been shown within 5 seconds.
+	setTimeout(() => {
+		if (body.classList.contains('hidden'))
+			showFatalError();
+	}, 5000);
 
 	// add click event listener
 	buttonAuditLog.addEventListener("click", openAuditLog, false);
@@ -53,6 +60,7 @@ function init() {
 	// add click event listener
 	buttonSettings.addEventListener("click", openSettings, false);
 	buttonClearInjected.addEventListener("click", clearInjectedScripts, false);
+	buttonAllowUserScripts.addEventListener("click", allowUserScripts, false);
 	// add click event listener
 	buttonController.addEventListener("click", openController, false);
 	// add event listener to clear audit and error logs
@@ -70,6 +78,12 @@ function init() {
 
 	hideDevelopmentOnlyControls();
 };
+
+// Hides the popup and shows the error banner in its place.
+function showFatalError() {
+	body.classList.add('hidden');
+	renderingOutput.classList.remove('hidden');
+}
 
 // The reload button tears down and rebuilds the extension, which is something we do while working on it and
 // not something to hand a user. installType is the authoritative answer and the only one that holds in both
@@ -109,13 +123,36 @@ BROWSER.storage.onChanged.addListener(async (changes, area) => {
 		//if (persistence.settings.debugMessages) {
 		//	console.log("local persistence changed");
 		//}
-		await Persistence.reloadPersistence(true);
+		await Persistence.reloadPersistence();
 		updateSettings();
-		updateAuditLog();
-		updateErrorLog();
 		updateServerPort();
 	}
+
+	// a log entry is its own key; redraw the logs at most every 500 ms while requests run
+	if (area === "local" && Object.keys(changes).some(key => key.startsWith("audit.") || key.startsWith("error.")) && !logRedrawTimer)
+		logRedrawTimer = setTimeout(async () => {
+			logRedrawTimer = null;
+			updateAuditLog();
+			updateErrorLog();
+		}, 500);
 });
+
+// The logs as the background stored them, one key per entry ("audit.12"), oldest first.
+let auditEntries = [];
+let errorEntries = [];
+let logRedrawTimer = null;
+
+async function loadLogs() {
+	const all = await BROWSER.storage.local.get(null);
+	const entriesFor = (prefix) => Object.keys(all)
+		.filter(key => key.startsWith(prefix))
+		.map(key => Number(key.slice(prefix.length)))
+		.sort((a, b) => a - b)
+		.map(n => all[prefix + n]);
+
+	auditEntries = entriesFor("audit.");
+	errorEntries = entriesFor("error.");
+}
 
 
 //Function below opens controller webbage
@@ -126,7 +163,7 @@ async function openController(objectEvent) {
 }
 //Function below toggles chrome extension between settings and output
 async function openSettings(objectEvent) {
-	await Persistence.reloadPersistence(true);
+	await Persistence.reloadPersistence();
 	persistence.viewMode = "settings";
 	updateSettings();
 	updateInjectedScripts();
@@ -142,9 +179,12 @@ async function updateInjectedScripts() {
 	const list = document.getElementById("injectedList");
 
 	list.innerHTML = "";
+	buttonAllowUserScripts.classList.add("hidden");
 
+	// user scripts are off when the API is missing or refuses: the button to turn them on shows only then
 	if (!BROWSER.userScripts) {
 		status.textContent = "User scripts are not allowed for this extension";
+		buttonAllowUserScripts.classList.remove("hidden");
 		return;
 	}
 
@@ -154,8 +194,11 @@ async function updateInjectedScripts() {
 		registered = await BROWSER.userScripts.getScripts();
 	} catch (err) {
 		status.textContent = "Could not read what is registered: " + err.message;
+		buttonAllowUserScripts.classList.remove("hidden");
 		return;
 	}
+
+	userScriptsHint.classList.add("hidden");
 
 	status.textContent = registered.length
 		? registered.length + " registered"
@@ -176,6 +219,29 @@ async function updateInjectedScripts() {
 	});
 }
 
+// Asks for user scripts, which GPAL's execute-javascript and injected scripts need. Only ever from this button.
+// Firefox grants userScripts only as an optional permission and only from a click, with its own prompt. Chrome and
+// Edge have no API that turns it on, so this opens the extension's details page, where the toggle is.
+async function allowUserScripts(objectEvent) {
+	if (IS_FIREFOX) {
+		// Firefox's own switch for this is "Allow unverified third-party scripts to access your data" under the
+		// add-on's Permissions in about:addons
+		await BROWSER.permissions.request({ permissions: ["userScripts"] })
+			.catch(err => {
+				userScriptsHint.textContent = 'In about:addons, open OttoMagic, Permissions, and turn on "Allow unverified third-party scripts to access your data".';
+				userScriptsHint.classList.remove("hidden");
+			});
+		updateInjectedScripts();
+		return;
+	}
+
+	const browserPage = navigator.userAgent.includes("Edg/") ? "edge" : "chrome";
+
+	userScriptsHint.textContent = 'Turn on "Allow user scripts" on the page that opened, then reopen this popup.';
+	userScriptsHint.classList.remove("hidden");
+	BROWSER.tabs.create({ url: `${browserPage}://extensions/?id=${BROWSER.runtime.id}` });
+}
+
 // only what we registered, since the ids are ours and no extension can see another's scripts anyway
 async function clearInjectedScripts(objectEvent) {
 	if (!BROWSER.userScripts) return;
@@ -192,7 +258,7 @@ async function clearInjectedScripts(objectEvent) {
 }
 
 async function openAuditLog(objectEvent) {
-	await Persistence.reloadPersistence(true);
+	await Persistence.reloadPersistence();
 	persistence.viewMode = "audit-log";
 	updateAuditLog();
 	updateViewState();
@@ -200,7 +266,7 @@ async function openAuditLog(objectEvent) {
 }
 
 async function openErrorLog(objectEvent) {
-	await Persistence.reloadPersistence(true);
+	await Persistence.reloadPersistence();
 	persistence.viewMode = "error-log";
 	updateErrorLog();
 	updateViewState();
@@ -231,12 +297,9 @@ function eraseAllOutput(objectEvent) {
 
 //the prompt didn't want to call the erase function in the effect attribute so this was created to delete all ouput after confitming erase all
 async function eraseAllConfirmed() {
-	await Persistence.reloadPersistence(true);
-	persistence.auditLog = [];
-	persistence.errorLog = [];
-	Persistence.savePersistence();
+	// the background owns the logs; storage.onChanged redraws them once they are gone
+	Messaging.sendMessageToBackground(REQUEST.CLEAR_LOGS);
 	refreshPopup();
-	Messaging.sendMessageToBackground(REQUEST.RELOAD_PERSISTENCE);
 }
 
 //Function sends user to company website
@@ -301,7 +364,7 @@ function closeExtension(objectEvent) {
 // This function updates the settings based on user input
 function updateSettingsInterface(objectEvent) {
 	// Switch statement checks the type of input element and updates the persistence object accordingly
-	Persistence.reloadPersistence(true).then(() => {
+	Persistence.reloadPersistence().then(() => {
 		switch (objectEvent.target.type) {
 			case "checkbox":
 				persistence.settings[objectEvent.target.id] = objectEvent.target.checked;
@@ -351,75 +414,6 @@ function updateSettingsInterface(objectEvent) {
 	});
 }
 
-/*
-The purpose of this code below is to check if the user has given permission to record their activity on
-open tabs, and if any tabs have declined to be recorded. If all tabs have given permission to be recorded,
-or if there are no tabs open, the function calls actuallyStartDoingTheThings() to begin recording user
-activity.
-
-*/
-
-/*
-The overall goal of the Messaging.messageAllTabs function is to send a message to all tabs in the current window,
-and optionally execute a function after each tab has responded to the message.
-*/
-function messageAllTabs(message, callback) {
-	// Query all tabs in the current window
-	BROWSER.tabs.query({ lastFocusedWindow: true }, (tabs) => {
-		// For each tab
-		for (const tab of tabs) {
-			try {
-				if (REQUEST.CAN_WE_COMMUNICATE === message)	// prepare to track the replies
-					Globals.responseTracker[tab.id] = {
-						responded: false
-					};
-				// Send the message to the tab
-				BROWSER.tabs.sendMessage(
-					tab.id,
-					message,
-					{},
-					(response) => {
-						// If a callback function is provided, execute it with the response as the argument
-						if (typeof callback === "function") {
-							callback(tab.id, response);
-						}
-
-						// Ignore any runtime errors
-						void BROWSER.runtime.lastError;
-					}
-				);
-			} catch (error) {
-				// Handle different types of errors that can occur when sending messages to tabs
-				switch (error.message) {
-					// If the message context or extension context is invalidated, log a warning message
-					case "Message context invalidated.":
-					case "Extension context invalidated.":
-						Globals.LogMessage(LOG_TYPE.DEBUG,
-							"Ottomatic has been reloaded since the recording began, and tab ID " +
-								tab.id +
-								" is now stale."
-						);
-						break;
-
-					// If the receiving end of the message does not exist (i.e., the tab has closed), log a warning message
-					case "Could not establish connection. Receiving end does not exist.":
-						Globals.LogMessage(LOG_TYPE.DEBUG,
-							"Tab ID " +
-								tab.id +
-								" has closed since recording began."
-						);
-						break;
-
-					// Otherwise, re-throw the error
-					default:
-					case "The message port was closed before a response was received.":
-						Globals.LogMessage(LOG_TYPE.DEBUG, error);
-				}
-			}
-		}
-	});
-}
-
 /**
  *
  This function creates a ZIP archive of the aduit logs
@@ -427,10 +421,11 @@ function messageAllTabs(message, callback) {
 async function zipUpAllTheThings() {
 
 	// Convert and flatten audit log
-	const auditCSV = arrayToCsv(persistence.auditLog);
+	await loadLogs();
+	const auditCSV = arrayToCsv(auditEntries);
 
 	// Convert and flatten error log
-	const errorCSV = arrayToCsv(persistence.errorLog);
+	const errorCSV = arrayToCsv(errorEntries);
 
 
 	// Create a new JSZip object to create the ZIP archive.
@@ -533,7 +528,7 @@ function updateSettings() {
 
 	if (auditMaxEntriesInput) {
 		auditMaxEntriesInput.value =
-			persistence.settings?.auditMaxEntries ?? 25;
+			persistence.settings.auditMaxEntries;
 	}
 }
 
@@ -546,8 +541,9 @@ let maxEntries = 999;
 
 // Clears any active text selection and marks up all element actions based on the current settings.
 async function updateAuditLog() {
+	await loadLogs();
 	// Force a fresh reload every time the UI is updated
-	await Persistence.reloadPersistence(true);   // fire-and-forget is fine here
+	await Persistence.reloadPersistence();   // fire-and-forget is fine here
 
 	const table = document.querySelector(".table-scroll table");
 	if (!table) return;
@@ -570,7 +566,7 @@ async function updateAuditLog() {
 	thead.innerHTML = "";
 	tbody.innerHTML = "";
 
-	if (!persistence?.auditLog?.length) {
+	if (!auditEntries.length) {
 		const row = document.createElement("tr");
 		const cell = document.createElement("td");
 
@@ -584,9 +580,9 @@ async function updateAuditLog() {
 		return;
 	}
 
-	maxEntries = persistence.settings?.auditMaxEntries ?? persistence.auditLog.length;
+	maxEntries = persistence.settings?.auditMaxEntries ?? auditEntries.length;
 
-	let workingData = persistence.auditLog.slice(-maxEntries);
+	let workingData = auditEntries.slice(-maxEntries);
 
 	sortState.ascending = persistence.settings?.auditAscending ?? true;
 
@@ -674,12 +670,12 @@ async function updateAuditLog() {
 }
 
 async function handleSort(column) {
-	await Persistence.reloadPersistence(true);
+	await Persistence.reloadPersistence();
 	if (sortState.column === column) {
 		sortState.ascending = !sortState.ascending;
 		persistence.settings.auditAscending = sortState.ascending;
 		Persistence.savePersistence();
-//			Persistence.reloadPersistence(true);
+//			Persistence.reloadPersistence();
 	} else {
 		sortState.column = column;
 		sortState.ascending = true;
@@ -689,8 +685,9 @@ async function handleSort(column) {
 }
 
 async function updateErrorLog() {
+	await loadLogs();
 	// Force a fresh reload every time the UI is updated
-	await Persistence.reloadPersistence(true);   // fire-and-forget is fine here
+	await Persistence.reloadPersistence();   // fire-and-forget is fine here
 
 	const table = document.querySelector(".errtable-scroll table");
 	if (!table) return;
@@ -713,7 +710,7 @@ async function updateErrorLog() {
 	thead.innerHTML = "";
 	tbody.innerHTML = "";
 
-	if (!persistence?.errorLog?.length) {
+	if (!errorEntries.length) {
 		const row = document.createElement("tr");
 		const cell = document.createElement("td");
 
@@ -727,9 +724,9 @@ async function updateErrorLog() {
 		return;
 	}
 
-	maxEntries = persistence.settings?.auditMaxEntries ?? persistence.errorLog.length;
+	maxEntries = persistence.settings?.auditMaxEntries ?? errorEntries.length;
 
-	let workingData = persistence.errorLog.slice(-maxEntries);
+	let workingData = errorEntries.slice(-maxEntries);
 
 	sortState.ascending = persistence.settings?.auditAscending ?? true;
 
@@ -923,7 +920,7 @@ function toggleDarkMode() {
 }
 
 async function refreshPopup() {
-	await Persistence.reloadPersistence(true);
+	await Persistence.reloadPersistence();
 	if (true == persistence.settings.darkMode)
 		darkModeOn();
 	else

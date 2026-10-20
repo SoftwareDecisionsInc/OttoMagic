@@ -35,7 +35,7 @@ class Globals {
     static injectedScriptIds = [];
     static injectedScriptPrefix = 'gpal-injected-';
 
-    static serverStatusCode;
+    static serverStatusCodes = {};   // tab id -> HTTP status of the last page that tab loaded
 
     // Why the last top-level navigation failed outright, or null when the page is fine. A page that never loads
     // runs no content script, so nothing can answer get-ready-status and the caller would poll a dead tab until it

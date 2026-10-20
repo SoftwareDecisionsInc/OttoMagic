@@ -385,11 +385,9 @@ function initNetworkIdleObserver() {
 function queryNetworkIdle(timeoutMs, maxConnections, pruneMs) {
     const entries = window.networkIdleObserver.entries
         .filter(e => e.startTime > performance.now() - pruneMs);
-    //entries.forEach((entry, index) => {
     if (persistence.settings.debugMessages) {
-        console.log(`Entry ${index}:`, entry);
+        entries.forEach((entry, index) => console.log(`Entry ${index}:`, entry));
     }
-    //});
     const count = entries.length;
     const lastTime = count ? Math.max(...entries.map(e => e.startTime + e.duration)) : 0;
     return count <= maxConnections && performance.now() - lastTime >= timeoutMs;
@@ -800,7 +798,9 @@ function isNullEmptyOrWhitespace(str) {
 function scrollPage(direction) {
     try {
         const isDown = direction === 'down';
-        const scrollAmount = isDown ? window.innerHeight : -window.innerHeight;
+        // 87.5% of the view, as the browser's own Page Down steps, so each page overlaps the last and nothing under a
+        // fixed header or on a page boundary is skipped
+        const scrollAmount = Math.round(window.innerHeight * 0.875) * (isDown ? 1 : -1);
         const keyName = isDown ? 'PageDown' : 'PageUp';
         const keyCode = isDown ? 34 : 33;
         let scrollMethod = 'none';
@@ -888,7 +888,8 @@ function scrollPage(direction) {
 function scrollToPosition(position) {
     try {
         const isEnd = position === 'end';
-        const scrollTarget = isEnd ? document.body.scrollHeight : 0;
+        // the page's full height is documentElement's; body is shorter by its margins
+        const scrollTarget = isEnd ? Math.max(document.documentElement.scrollHeight, document.body.scrollHeight) : 0;
         const keyName = isEnd ? 'End' : 'Top';
         const keyCode = isEnd ? 35 : 36;
         let scrollMethod = 'none';

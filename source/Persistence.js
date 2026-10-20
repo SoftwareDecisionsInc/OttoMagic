@@ -19,8 +19,6 @@ class Persistence {
         //stores unique selectorSets, used to reuse selectors
         this.selectorSets = [];
         this.variables = [];
-        this.auditLog = [];
-        this.errorLog = [];
 
         try {
             this.pageURL = "_content.js: " + window.location.href;
@@ -48,8 +46,8 @@ class Persistence {
     // authoritative: the background owns the in-memory copy and is the only log
     // writer, and no context keeps unsaved changes, so a reload always takes
     // storage as-is. Triggered on startup and on change events, never in a write
-    // path. forceReload is retained for call-site compatibility and unused.
-    static reloadPersistence(forceReload) {
+    // path.
+    static reloadPersistence() {
         async function reload() {
             try {
                 return await new Promise((resolve, reject) => {
@@ -103,7 +101,7 @@ class Persistence {
                                 reject(BROWSER.runtime.lastError);
                             }
                         } else {
-                            Globals.LogMessage("saving persistence:", persistence);
+                            Globals.LogMessage("saving persistence");
                             resolve();
                         }
                     });

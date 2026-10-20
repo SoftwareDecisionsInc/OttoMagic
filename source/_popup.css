@@ -334,6 +334,17 @@ button {
     width: 60px;
 }
 
+/* a button that is a line of text, not an icon: sized to its words, so the words are what you click */
+button.text-button {
+    height: auto;
+    width: auto;
+    padding: 4px 10px;
+    margin: 4px 0;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
     button:disabled svg {
         color: #a5a5a5;
         fill: #a5a5a5;

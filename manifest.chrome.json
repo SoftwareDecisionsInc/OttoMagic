@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OttoMagic - Browser Control via GPAL's REST API",
-  "version": "1.0.0.0",
+  "version": "1.0.0.2",
   "description": "Control your real browser with HTTP requests from any language, no driver needed. Plays back OttoMatic and GPAL workflows.",
   "icons": {
     "16": "images/robot-16.png",

@@ -9,7 +9,7 @@
 </head>
 
 <body>
-    <div id="renderingOutput">🡆 FATAL EXTENSION ERROR 🡄</div>
+    <div id="renderingOutput" class="hidden">🡆 FATAL EXTENSION ERROR 🡄</div>
     <div id="body" class="hidden">
         <div id="divUnderlay">
             <section id="sectionButtons">
@@ -236,8 +236,10 @@
                         <fieldset id="fieldsetInjected" class="bottom">
                             <legend class="dotnet-class">Injected Scripts</legend>
                             <div id="injectedStatus" class="dotnet-method">None registered</div>
+                            <button id="buttonAllowUserScripts" class="dotnet-method text-button hidden">Turn On User Scripts</button>
+                            <div id="userScriptsHint" class="dotnet-method hidden"></div>
                             <ul id="injectedList"></ul>
-                            <button id="buttonClearInjected" class="dotnet-method">Remove All</button>
+                            <button id="buttonClearInjected" class="dotnet-method text-button">Remove All</button>
                         </fieldset>
                     </div>
                 </div>

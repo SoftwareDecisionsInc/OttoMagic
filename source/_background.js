@@ -8,11 +8,41 @@ try {
     //console.error('Background error:', error);
 }
 
+// only the background writes the logs; logError checks this
+Globals.inBackground = true;
+
+// A service worker takes error and unhandledrejection handlers only while the script first runs; added later (they
+// were in nativeInit) the browser refuses them with a warning and nothing is ever logged
+self.addEventListener("error", (event) => {
+    logError({
+        type: "error",
+        message: event.message,
+        stack: event.error?.stack,
+        file: event.filename,
+        line: event.lineno,
+        column: event.colno,
+    });
+});
+
+self.addEventListener("unhandledrejection", (event) => {
+    logError({
+        type: "unhandledrejection",
+        message: event.reason?.message || String(event.reason),
+        stack: event.reason?.stack,
+    });
+});
+
 var port;
 // Set when we are deliberately taking the native app down ahead of an extension
 // reload. The reload brings up a fresh one, so the disconnect that follows must
 // not be treated as a failure to recover from.
 var nativeAppShuttingDown = false;
+// A native app that exits right after starting would otherwise be respawned forever. A connection that
+// lived NATIVE_HEALTHY_MS counts as good and resets the count.
+const NATIVE_RESPAWN_LIMIT = 3;
+const NATIVE_HEALTHY_MS = 10000;
+var nativeConnectedAt = 0;
+var nativeQuickFailures = 0;
 var manifest = BROWSER.runtime.getManifest();
 var extensionVersion = manifest.version;
 
@@ -98,11 +128,19 @@ async function init() {
         await reloadPersistence();
         
         nativeInit();
-        // make the last operation status code available to GPAL via endpoint - get-status-code
+        // the HTTP status of each tab's page, for get-status-code. Taken when the response starts, which is before
+        // the navigation commits and goto answers, so it is there when GPAL asks right after; a redirect's final
+        // response comes last and wins
+        BROWSER.webRequest.onResponseStarted.addListener(
+            (details) => {
+                if (details.type === "main_frame")
+                    Globals.serverStatusCodes[details.tabId] = details.statusCode;
+            },
+            { urls: ["<all_urls>"] }
+        );
         BROWSER.webRequest.onCompleted.addListener(
             (details) => {
                 if (details.type === "main_frame") {
-                    Globals.serverStatusCode = details.statusCode;
                     // A main-frame load completed -- the pending goto (if any) made
                     // it, so clear it: a later, unrelated nav error must not retry a
                     // stale target.
@@ -219,7 +257,7 @@ async function handleNavigationError(details) {
     // on a human. Leave it up so the operator can click through (or back out),
     // and just record it. Retrying would only re-show the same warning.
     if (isUserActionableInterstitial(error)) {
-        await Persistence.reloadPersistence(true);
+        await Persistence.reloadPersistence();
         logAuditTrail('background.js', `tabId [${details.tabId}]`, `nav-interstitial, awaiting user decision ${detail}`);
         await Persistence.savePersistence();
         return;
@@ -235,7 +273,7 @@ async function handleNavigationError(details) {
     // serial native loop, so a stale/undefined copy would drop the entry.
     Globals.navError = detail;
 
-    await Persistence.reloadPersistence(true);
+    await Persistence.reloadPersistence();
     logError({ type: 'nav-error', message: `navigation failed, page not loaded ${detail}` });
     logAuditTrail('background.js', `tabId [${details.tabId}]`, `nav-error, page not loaded ${detail}`);
     await Persistence.savePersistence();
@@ -252,11 +290,8 @@ async function handleNavigationError(details) {
  */
 async function clearLogsOnStartIfEnabled() {
     await reloadPersistence();
-    if (persistence?.settings?.clearLogsOnStart) {
-        persistence.auditLog = [];
-        persistence.errorLog = [];
-        await Persistence.savePersistence();
-    }
+    if (persistence?.settings?.clearLogsOnStart)
+        await clearLogs();
 }
 
 /**
@@ -275,6 +310,8 @@ function nativeInit() {
                 //);
 
                 port = BROWSER.runtime.connectNative('gpal.rest.api.nativeapp');
+                nativeConnectedAt = Date.now();
+                nativeQuickFailures = 0;
 
                 // Immediate check for connection failure (most common when app is not installed)
                 if (!port) {
@@ -284,26 +321,6 @@ function nativeInit() {
 
                 port.onMessage.addListener(Messaging.readFromNativeApp);
                 port.onDisconnect.addListener(restartRestServer);
-
-                self.addEventListener("error", (event) => {
-                    logError({
-                        type: "error",
-                        message: event.message,
-                        stack: event.error?.stack,
-                        file: event.filename,
-                        line: event.lineno,
-                        column: event.colno,
-                    });
-                });
-
-                self.addEventListener("unhandledrejection", (event) => {
-                    logError({
-                        type: "unhandledrejection",
-                        message: event.reason?.message || String(event.reason),
-                        stack: event.reason?.stack,
-                    });
-                });
-
             } catch (e) {
                 Globals.LogMessage(
                     LOG_TYPE.WARN,
@@ -322,19 +339,39 @@ function nativeInit() {
 function handleNativeConnectFailure() {
         console.warn("Native app not found or failed to connect. Redirecting to website.");
 
-        Globals.LogMessage(
-            LOG_TYPE.WARN,
-            "Native app not installed. Opening GPAL website..."
-        );
+        offerRestApiDownload();
+}
 
-        // Open the website in a new tab
-        BROWSER.tabs.create({
-            url: "https://gpal.sditx.com/gpal-rest-api"
-        }).catch(err => {
-            console.error("Failed to open tab:", err);
-            // Fallback
-            window.open("https://gpal.sditx.com/gpal-rest-api", "_blank");
-        });
+/**
+* Opens the GPAL REST API download page, once per browser session. Every service-worker wake retries the
+* connection, and the new tab wakes the worker again, so without the session flag every wake opened another tab.
+*
+* @function offerRestApiDownload
+* @returns {Promise<void>}
+*/
+async function offerRestApiDownload() {
+    const REST_API_SITE = "https://gpal.sditx.com/gpal-rest-api";
+
+    try {
+        const already = await BROWSER.storage.session.get("restApiOfferShown");
+
+        if (already?.restApiOfferShown)
+            return;
+
+        await BROWSER.storage.session.set({ restApiOfferShown: true });
+    } catch (error) {
+        console.warn("Could not record the REST API offer, not opening a tab:", error);
+        return;
+    }
+
+    Globals.LogMessage(
+        LOG_TYPE.WARN,
+        "GPAL REST API not installed. Opening the download page..."
+    );
+
+    BROWSER.tabs.create({ url: REST_API_SITE }).catch(err => {
+        console.error("Failed to open tab:", err);
+    });
 }
 
 /**
@@ -344,7 +381,7 @@ function handleNativeConnectFailure() {
 * @function restartRestServer
 * @returns {void}
 */
-function restartRestServer() {
+function restartRestServer(disconnectedPort) {
 
     // The port died with the process. Drop it now rather than let the popup keep showing a number that no longer
     // answers -- the replacement process pushes its own the moment it has a listener, and it may not be the same
@@ -352,7 +389,8 @@ function restartRestServer() {
     persistence.serverPort = null;
     Persistence.savePersistence();
 
-    const err = BROWSER.runtime.lastError;
+    // Firefox reports on the port, Chrome on lastError
+    const errorMessage = disconnectedPort?.error?.message ?? BROWSER.runtime.lastError?.message;
     // We asked the native app to die so we could reload. Its disconnect means the
     // process is actually gone -- reload now rather than reconnect. Doing it here
     // instead of on the 'die' ack guarantees the old app is out before the reload
@@ -365,7 +403,7 @@ function restartRestServer() {
     
 
     const isHostMissing =
-        err?.message === 'Specified native messaging host not found.';
+        errorMessage === 'Specified native messaging host not found.';
 
     // Clean up old port safely (Firefox may already have it gone)
     try {
@@ -380,11 +418,22 @@ function restartRestServer() {
             `GPAL REST API Native App not installed!`
         );
 
-        BROWSER.tabs.create({
-            url: "https://gpal.sditx.com/",
-            active: true
-        });
+        offerRestApiDownload();
 
+        port = null;
+        return;
+    }
+
+    // this extension's ID is not in the host manifest's allowed_origins; retrying cannot fix that
+    if (errorMessage === 'Access to the specified native messaging host is forbidden.') {
+        logError({ type: "native", message: "GPAL REST API refused this extension: its ID is not in the native host manifest" });
+        port = null;
+        return;
+    }
+
+    nativeQuickFailures = Date.now() - nativeConnectedAt < NATIVE_HEALTHY_MS ? nativeQuickFailures + 1 : 0;
+    if (nativeQuickFailures >= NATIVE_RESPAWN_LIMIT) {
+        logError({ type: "native", message: `GPAL REST API keeps exiting${errorMessage ? ': ' + errorMessage : ''}; not restarting it` });
         port = null;
         return;
     }
@@ -392,6 +441,7 @@ function restartRestServer() {
     // Firefox reality: disconnect usually = unknown failure
     try {
         port = BROWSER.runtime.connectNative('gpal.rest.api.nativeapp');
+        nativeConnectedAt = Date.now();
 
         port.onMessage.addListener(Messaging.readFromNativeApp);
         port.onDisconnect.addListener(restartRestServer);

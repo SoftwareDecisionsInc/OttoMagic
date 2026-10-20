@@ -1,29 +1,17 @@
 // Set BROWSER constant to chrome or browser object, depending on which is available
 const BROWSER = globalThis.browser ?? globalThis.chrome;
-// Firefox defines globalThis.browser; Chrome/Edge only define globalThis.chrome.
-// Works in content scripts too, unlike probing for background-only APIs.
-const IS_FIREFOX = globalThis.browser != null;
+// Firefox's extension pages are moz-extension:// and Chrome's and Edge's are chrome-extension://. A browser object no
+// longer tells them apart, since Chromium now has one too. getURL works in content scripts as well.
+const IS_FIREFOX = BROWSER.runtime.getURL("").startsWith("moz-extension:");
 
 /* This constant defines the class name for the highlighted and dashed-outline css */
 const HIGHLIGHTED_BOX_SHADOW_ELEMENT_CLASS = "gpal-box-shadow-line-element";
 
 // Define constant object for different types of requests
 const REQUEST = {
-    CAN_WE_COMMUNICATE: "can we communicate",
-
-    REMEMBER_THIS_THING: "remember this thing",
-    RECALL_ALL_THE_THINGS: "recall all the things",
-    FORGET_ALL_THE_THINGS: "forget all the things",
-    ZIP_UP_ALL_THE_THINGS: "zip up all the things",
-
-    CHANGE_SETTINGS: "change settings",
-    UPDATE_INDICES: "update indices",
     RELOAD_PERSISTENCE: "reload persistence",
-    RELOAD_PERSISTENCE2: "reload persistence2",
-    TAKE_SCREENSHOT: "take a screenshot",
-    REMOVE_HIGHLIGHT: "remove highlight",
+    CLEAR_LOGS: "clear logs",
     GET_TOP_LEVEL_URL: "get top level url",
-    SET_TOP_LEVEL_URL: "set top level url",
 
     CAPTURE_VISIBLE_TAB: "capture-visible-tab",
 
@@ -31,43 +19,12 @@ const REQUEST = {
 
     FULLSCREEN: "fullscreen",
 
-    CREATE_WITHNEWTAB: 'create withnewtab',
-    CREATE_GOTO: 'create goto',
-
-    CONTEXT_MENU_ITEM1_CLICKED: "context menu item clicked",
-
-    OTTOMATIC_RELOAD: 'ottomatic reloaded',
-
     GET_MY_TAB_ID: 'get my tab id',
-    SET_CURRENT_TAB_ID: 'set current tab id',
     GET_MY_FRAME_ID: 'get my frame id',
-    SET_CURRENT_FRAME_ID: 'set current content id',
-    IGNORE_NEXT_GOTO: 'ignore next goto',
-    RESET_NEXT_GOTO: 'reset next goto to false',
-    CLOSE_ME: 'close me',
 
     SET_PORT: 'set-port',
 
-    GET_SETTINGS: 'get-settings',
-    GET_GPAL_SETTINGS: 'get-gpal-settings',
-    GET_BROWSER_SETTINGS: 'get-browser-settings',
-    GET_SELECTOR: 'get-selector',
-    GET_SELECTORS: 'get-selectors',
-    GET_WORKFLOW: 'get-workflow',
-    SEND_SETTINGS: 'send-settings',
-    SEND_GPAL_SETTINGS: 'send-gpal-settings',
-    SEND_BROWSER_SETTINGS: 'send-browser-settings',
-    SEND_SELECTOR: 'send-selector',
-    SEND_SELECTORS: 'send-selectors',
-    SEND_WORKFLOW: 'send-workflow',
-
-    SHOW_GPAL_ON_CONTEXT_MENU: 'show-gpal-on-context-menu',
-    SHOW_COPY_TO_CLIP_ON_CONTEXT: 'show-copy-to-clip-on-context',
-    CONTEXT_MENU_CLICK: 'context-menu-click',
     COPY_TO_CLIPBOARD: 'copy-to-clipboard',
-    TRANSLATE_TEXT: 'translate-text',
-
-    COPY_SELECTED_TEXT: 'copy-selected-text',
 
     CHECK_NETWORK_IDLE_CONTENT: 'check-network-idle-content',
     CHECK_NETWORK_IDLE_RESPONSE: 'check-network-idle-response',
@@ -91,9 +48,6 @@ const REQUEST = {
     FILL_IN_OVERWRITE: 'fill-in-overwrite',
 
     FIRE_CHANGE_EVENT: 'fire-change-event',
-
-    FRAME_CENSUS: 'frame-census',
-    FRAME_CENSUS_RESPONSE: 'frame-census-response',
 
     GET_ATTRIBUTE: 'get-attribute',
     SET_ATTRIBUTE: 'set-attribute',
@@ -123,7 +77,6 @@ const REQUEST = {
     GET_CAPTURED_CALLS: 'get-captured-calls',
 
     GET_USERAGENT: 'get-useragent',
-
 
     GET_WINDOW_RECTANGLE: 'get-window-rectangle',
 
@@ -204,6 +157,7 @@ const REQUEST = {
 
     SET_DOWNLOAD_FILENAME: 'set-download-filename',
     LEFT_CLICK_DOWNLOAD: 'left-click-download',
+    DOWNLOAD_URL: 'download-url',
     ELEMENT_FROM_POINT: 'element-from-point',
 
     SET_RANGE: 'set-range',

@@ -146,7 +146,7 @@ class Messaging {
     static async readFromNativeApp(request, sender, sendResponse) {
         
         var retval = true;
-        await Persistence.reloadPersistence(true);
+        await Persistence.reloadPersistence();
 
         Globals.LogMessage("readfromnativeapp: " + request.message);
 
@@ -162,7 +162,7 @@ class Messaging {
         }
 
         if (persistence?.settings?.debugMessages || !["die", "set-port"].includes(request.message)) {
-            await logAuditTrail(
+            logAuditTrail(
                 "native-app",
                 `tabId [${activeTabId}]`,
                 request.message + (request.data ? ' [' + Object.values(request.data)[0] + ']' : '')
@@ -243,13 +243,16 @@ class Messaging {
                 }
                 break;
             case REQUEST.CHECK_NETWORK_IDLE:
-                checkTabIdleStatus(activeTabId, request.timeoutMs, request.maxConnections, request.pruneMs)
+                // GPAL sends maxConnections and pruneMs in request.data. This answers at once; GPAL asks again until
+                // it gets idle or its own timeout ends. The quiet time a page needs stays this check's own.
+                checkTabIdleStatus(activeTabId, undefined, request.data?.maxConnections, request.data?.pruneMs)
                     .then(result => {
                         sendToNativeAppFromBackground(result);
                     });
                 break;
             case REQUEST.CLEAR_REFERRER:
-                setReferrerRule(null);
+                // drops a referrer set for the next navigation; nothing else in the browser carries one
+                await endOneNavigationReferrer();
                 sendToNativeAppFromBackground('OK');
                 retval = false;
                 break;
@@ -372,24 +375,40 @@ class Messaging {
                 });
                 retval = false;
                 break;
-            case REQUEST.CLOSE_WINDOW: // TEST: no parameter version 
+            case REQUEST.CLOSE_WINDOW: { // TEST: no parameter version
+                // Answers the window left active as { windowId, url }, as open-window and get-current-window do.
+                // Closing the last window takes this extension down with it, so then the answer goes first and
+                // names no window.
+                const closeAndAnswer = (windowId) => {
+                    BROWSER.windows.getAll({}, (windows) => {
+                        if (windows.length <= 1) {
+                            sendToNativeAppFromBackground({ windowId: null, url: null });
+                            BROWSER.windows.remove(windowId);
+                            return;
+                        }
+                        BROWSER.windows.remove(windowId, () => {
+                            BROWSER.windows.getLastFocused({ populate: true }, (win) => {
+                                const tab = win.tabs.find(t => t.active);
+                                sendToNativeAppFromBackground({ windowId: win.id, url: tab ? tab.url : null });
+                            });
+                        });
+                    });
+                };
+
                 if (!request.data) {
                     BROWSER.windows.getCurrent({}, (win) => {
-                        BROWSER.windows.remove(win.id);
-                        sendToNativeAppFromBackground('OK');
+                        closeAndAnswer(win.id);
                     });
                 }
                 else if (request.data.windowId) {
-                    BROWSER.windows.remove(request.data.windowId);
-                    sendToNativeAppFromBackground('OK');
+                    closeAndAnswer(request.data.windowId);
                 }
                 else if (request.data.url) {
                     BROWSER.windows.getAll({ populate: true }, (windows) => {
                         for (const window of windows) {
                             for (const tab of window.tabs) {
                                 if (tab.url && stripUrlPrefix(tab.url).startsWith(stripUrlPrefix(request.data.url))) {
-                                    BROWSER.windows.remove(window.id);
-                                    sendToNativeAppFromBackground('OK');
+                                    closeAndAnswer(window.id);
                                     return;
                                 }
                             }
@@ -398,6 +417,7 @@ class Messaging {
                     });
                 }
                 break;
+            }
             case REQUEST.DELETE_STORAGE:
                 if (!request.data.storageType) {
                     BROWSER.browsingData.remove({}, {
@@ -1120,7 +1140,8 @@ class Messaging {
                 });
                 break;
             case REQUEST.GET_STATUS_CODE:
-                sendToNativeAppFromBackground(Globals.serverStatusCode, true);
+                // 0 when this tab's page has no status: no response yet, or the navigation failed outright
+                sendToNativeAppFromBackground(Globals.serverStatusCodes[activeTabId] ?? 0);
                 retval = false;
                 break;
             case REQUEST.GET_STORAGE:
@@ -1919,6 +1940,9 @@ class Messaging {
 
                 // a download named against the page being left is not the one arriving next
                 disarmDownloadFilename("the caller navigated");
+
+                // the page being left's status is not the new page's
+                delete Globals.serverStatusCodes[activeTabId];
                 let gotoAcked = false;
                 let gotoTimer;
 
@@ -1927,12 +1951,13 @@ class Messaging {
                 // races GPAL's follow-up ready-status check, which then reads the
                 // still-current old page as 'complete' (seen on Firefox). A URL
                 // change in tabs.onUpdated is the navigation-committed signal.
-                function finishGoto() {
+                function finishGoto(refused = false) {
                     if (gotoAcked) return;
                     gotoAcked = true;
                     clearTimeout(gotoTimer);
                     try { BROWSER.tabs.onUpdated.removeListener(onGotoUpdated); } catch (e) { void e; }
-                    sendToNativeAppFromBackground(activeTabId != null ? { tabId: activeTabId, url: request.data.url } : 'NOTOK', true);
+                    try { BROWSER.webNavigation.onCommitted.removeListener(onGotoCommitted); } catch (e) { void e; }
+                    sendToNativeAppFromBackground(false === refused && activeTabId != null ? { tabId: activeTabId, url: request.data.url } : 'NOTOK', true);
                 }
 
                 function onGotoUpdated(tabId, changeInfo) {
@@ -1941,9 +1966,19 @@ class Messaging {
                     }
                 }
 
+                // A goto to the url the tab is already on loads the page again without changing the url, so
+                // onUpdated never reports one. The new document committing in the tab's main frame is the same
+                // signal for that case.
+                function onGotoCommitted(details) {
+                    if (details.tabId === activeTabId && 0 === details.frameId) {
+                        finishGoto();
+                    }
+                }
+
                 // Register before navigating so a fast commit isn't missed, but
                 // guarded so a listener failure can never block the navigation.
                 try { BROWSER.tabs.onUpdated.addListener(onGotoUpdated); } catch (e) { void e; }
+                try { BROWSER.webNavigation.onCommitted.addListener(onGotoCommitted); } catch (e) { void e; }
                 // Fallback: same-URL goto, blocked navigation, etc. may never fire
                 // a URL change; ack anyway so the serial native pipe never stalls.
                 gotoTimer = setTimeout(finishGoto, 8000);   // NOTE: hard coded value
@@ -1952,21 +1987,16 @@ class Messaging {
                 // reason GOTO moved off the old tabId-less tabs.update({url}) to
                 // executeScript. The two-arg form keeps that targeting without the
                 // page injection, which no-ops on the first call in Firefox.
-                // executeScript stays as the fallback.
+                // A url the browser refuses here (Firefox refuses file: from an
+                // extension) is answered NOTOK at once. The page cannot go there
+                // either, and the timer would answer as though it had.
                 try {
                     await BROWSER.tabs.update(activeTabId, {
                         url: ensureHttps(request.data.url)
                     });
                 } catch (err) {
-                    try {
-                        await BROWSER.scripting.executeScript({
-                            target: { tabId: activeTabId },
-                            func: (url) => {
-                                window.location.href = url;
-                            },
-                            args: [ensureHttps(request.data.url)]
-                        });
-                    } catch (e2) { void e2; }
+                    logError({ type: 'goto-error', message: `goto [${request.data.url}] refused by the browser: ${err}` });
+                    finishGoto(true);
                 }
                 break;
             }
@@ -1982,27 +2012,21 @@ class Messaging {
                         return;
                     });
                 } else if (request.data.url) {
+                    // One answer only. GPALRestAPI takes every reply after the first as the answer to the next
+                    // request. The first tab whose url starts with the one asked for, or failing that contains it,
+                    // is made active and its window focused; 'NOTOK' only when no tab matches.
+                    const wantedUrl = stripUrlPrefix(request.data.url);
                     BROWSER.tabs.query({}, (tabs) => {
-                        for (let tab of tabs) {
-                            if (stripUrlPrefix(tab.url).startsWith(stripUrlPrefix(request.data.url))) {
-                                BROWSER.tabs.update(tab.id, { active: true }, () => {
-                                    sendToNativeAppFromBackground({ tabId: tab.id, url: tab.url }, true);
-                                    return;
-                                });
-                            }
-                        }
-                        BROWSER.windows.getAll({ populate: true }, (windows) => {
-                            for (const window of windows) {
-                                for (const tab of window.tabs) {
-                                    if (tab.url && stripUrlPrefix(tab.url).includes(stripUrlPrefix(request.data.url))) {
-                                        BROWSER.windows.update(window.id, { focused: true }, (win) => {
-                                            sendToNativeAppFromBackground({ windowId: win.id, tabId: tab.id, url: tab.url }, true);
-                                            return;
-                                        });
-                                    }
-                                }
-                            }
+                        const tab = tabs.find(t => t.url && stripUrlPrefix(t.url).startsWith(wantedUrl))
+                                 ?? tabs.find(t => t.url && stripUrlPrefix(t.url).includes(wantedUrl));
+                        if (!tab) {
                             sendToNativeAppFromBackground('NOTOK', true);
+                            return;
+                        }
+                        BROWSER.tabs.update(tab.id, { active: true }, () => {
+                            BROWSER.windows.update(tab.windowId, { focused: true }, () => {
+                                sendToNativeAppFromBackground({ windowId: tab.windowId, tabId: tab.id, url: tab.url }, true);
+                            });
                         });
                     });
                 }
@@ -2017,18 +2041,29 @@ class Messaging {
                     });
                 }
                 else if (request.data.url) {
+                    // One answer only, as for goto-tab: the window holding the first tab whose url contains the one
+                    // asked for is focused; 'NOTOK' only when no tab matches.
+                    const wantedUrl = stripUrlPrefix(request.data.url);
                     BROWSER.windows.getAll({ populate: true }, (windows) => {
+                        let match = null;
                         for (const window of windows) {
-                            for (const tab of window.tabs) {
-                                if (tab.url && stripUrlPrefix(tab.url).includes(stripUrlPrefix(request.data.url))) {
-                                    BROWSER.windows.update(window.id, { focused: true }, (win) => {
-                                        sendToNativeAppFromBackground({ windowId: win.id, url: tab.url }, true);
-                                        return;
-                                    });
-                                }
+                            const tab = (window.tabs || []).find(t => t.url && stripUrlPrefix(t.url).includes(wantedUrl));
+                            if (tab) {
+                                match = { window, tab };
+                                break;
                             }
                         }
-                        sendToNativeApp('NOTOK', true);
+                        if (!match) {
+                            sendToNativeApp('NOTOK', true);
+                            return;
+                        }
+                        // the matching tab is made active too: the window alone keeps whatever tab it was showing,
+                        // and every request after this acts on the active tab
+                        BROWSER.tabs.update(match.tab.id, { active: true }, () => {
+                            BROWSER.windows.update(match.window.id, { focused: true }, (win) => {
+                                sendToNativeAppFromBackground({ windowId: win.id, url: match.tab.url }, true);
+                            });
+                        });
                     });
                 }
                 break;
@@ -2344,6 +2379,26 @@ class Messaging {
                 });
                 break;
             }
+            case REQUEST.DOWNLOAD_URL: {
+                // the browser downloads the url itself: no tab, and saveAs false never shows the dialog, whatever
+                // the profile says about asking where to save. the filename option names the download in every
+                // browser, relative to the download directory, so nothing is armed for onDeterminingFilename
+                disarmDownloadFilename("download-url names its own download");
+
+                const downloadName = downloadNameFor(request.data.downloadPath);
+                const options = { url: request.data.url, saveAs: false, conflictAction: "overwrite" };
+
+                if (downloadName)
+                    options.filename = downloadName;
+
+                BROWSER.downloads.download(options)
+                    .then(downloadId => sendToNativeAppFromBackground({ downloadId }))
+                    .catch(async err => {
+                        await logError({ type: REQUEST.DOWNLOAD_URL, message: err?.message || String(err), stack: err?.stack });
+                        sendToNativeAppFromBackground('NOTOK');
+                    });
+                break;
+            }
             case REQUEST.SET_RANGE:
                 Messaging.messageATab(activeTabId, contentFrameId, {
                     message: request.message,
@@ -2355,7 +2410,7 @@ class Messaging {
                 break;
             case REQUEST.GOOGLE_REFERRER:
                 try {
-                    setReferrerRule("https://www.google.com");
+                    await setOneNavigationReferrer("https://www.google.com/");
                     sendToNativeAppFromBackground('OK');
                 } catch (err) {
                     await logError({ type: REQUEST.GOOGLE_REFERRER, message: err?.message || String(err), stack: err?.stack });
@@ -2366,7 +2421,8 @@ class Messaging {
             case REQUEST.OVERRIDE_REFERRER:
                 try {
                     if (request.data.url) {
-                        setReferrerRule(ensureHttps(request.data.url));
+                        // GPAL sends this just before each GoTo, so the referrer goes with that navigation only
+                        await setOneNavigationReferrer(ensureHttps(request.data.url));
                         sendToNativeAppFromBackground('OK');
                     }
                     else
@@ -2689,30 +2745,6 @@ class Messaging {
     }
 
     /**
-     * Handles messages received from the extension's popup and dispatches the
-     * corresponding commands to the native messaging host.
-     *
-     * @static
-     * @param {Object} request - The message received from the popup.
-     * @param {string} request.message - The command or action requested by the popup.
-     * @param {*} [request.data] - Optional payload associated with the command.
-     * @param {Object} sender - Information about the sender of the message.
-     * @param {Function} sendResponse - Callback that can be used to send a response
-     * to the sender if needed.
-     * @returns {void}
-     */
-    static readFromPopup(request, sender, sendResponse) {
-
-        switch (request.message) {
-            case "name":    // from form, name in data part
-                sendToNativeApp(request.data);
-                break;
-
-            default:
-                sendToNativeApp(request.message);
-        }
-    }
-    /**
      * Sends a message from the background script to other extension contexts,
      * such as the popup, using the browser runtime messaging API.
      *
@@ -2866,26 +2898,6 @@ class Messaging {
             || (0xBA <= keypressEvent.which && keypressEvent.which <= 0xC0) //punctuation
             || (0xDB <= keypressEvent.which && keypressEvent.which <= 0xDF) //punctuation
             ;
-    }
-
-    /*
-        The overall goal of the messageAllTabs function is to send a message to all tabs in the current window,
-        and optionally execute a function after each tab has responded to the message.
-    */
-    static messageAllTabs(message, callback) {
-        // Query all tabs in the current window
-        try {
-            if (true === Globals.debug)
-                debugger;
-            BROWSER.tabs.query({ lastFocusedWindow: true }, (tabs) => {
-                // For each tab
-                for (const TAB of tabs)
-                    this.messageATab(TAB.id, null, message, callback);
-            });
-        } catch (error) {
-            Globals.LogMessage('messageAllTabs BROWSER.tabs.query error', error);
-            logError({ type: 'messaging-error', message: `messageAllTabs BROWSER.tabs.query error ${error}` });
-        }
     }
 
     static messageATab(tabId, contentId, message, callback) {
@@ -3047,8 +3059,11 @@ class Messaging {
         if (!message.message)
             switch (message) {
                 case REQUEST.RELOAD_PERSISTENCE:
-                    //Messaging.messageAllTabs(REQUEST.RELOAD_PERSISTENCE2);
-                    reloadPersistence(true);
+                    reloadPersistence();
+                    break;
+                case REQUEST.CLEAR_LOGS:
+                    clearLogs().then(() => functionSendResponse(true));
+                    retval = true;   // answered once the keys are gone
                     break;
                 case REQUEST.GET_MY_TAB_ID:
                     functionSendResponse(Globals.currentTabID);
@@ -3086,15 +3101,6 @@ class Messaging {
                         }
                     }
                     retval = true; // Async response
-                    break;
-                case REQUEST.SET_TOP_LEVEL_URL: // we get this from frame 0, top document, but any iframes have no idea... so broadcast this to them
-                    Globals.currentUrl = message.url;
-                    Messaging.messageATab(Globals.currentTabID, null, { message: REQUEST.SET_TOP_LEVEL_URL, url: message.url });
-                    functionSendResponse(true);
-                    break;
-                case REQUEST.SET_CURRENT_FRAME_ID:
-                    Globals.currentTabID = sender.tab.id;
-                    Globals.currentContentID = message.contentId;
                     break;
                 case REQUEST.TRUSTED_DRAG: {
                     // Content detected a native draggable and wants a trusted drag.
@@ -3152,22 +3158,6 @@ class Messaging {
             console.log(`request [${JSON.stringify(request)}]`);
 
         switch (request.message) {
-            //////////////////////////////////////////
-            // internal house keeping messages
-            case REQUEST.RELOAD_PERSISTENCE2:
-                // for whatever reasons, it takes 3 tries to sync persistence sometimes, could it be more if there are more iframes?
-                Persistence.reloadPersistence(true);
-                break;
-            case REQUEST.SET_TOP_LEVEL_URL:
-                // some messages are only handled by the top level document (0)
-                if (0 === Globals.currentContentID) {
-
-                    if (typeof Globals.currentUrl === 'undefined' || 0 !== Globals.currentContentID)     // if we are content 0, we initiated a broadcast to all frames to set their top level ur;
-                        Globals.currentUrl = request.message.url;
-                    sendResponse(true);
-                }
-                break;
-            //////////////////////////////////////////
             case REQUEST.CHECK_NETWORK_IDLE_CONTENT:
                 const idleState = window.networkIdleObserver
                     ? queryNetworkIdle(request.timeoutMs || 500, request.maxConnections ?? 0, request.pruneMs || 3000)
@@ -3263,6 +3253,8 @@ class Messaging {
                 break;
             case REQUEST.GET_WINDOW_RECTANGLE:
                 if (0 == Globals.currentContentID)
+                    // X and Y are the inner width and height, not a position. Every GPAL release reads this shape,
+                    // so it stays as it is: a change would break every GPAL and OttoMagic pair of different versions
                     sendResponse({ X: window.innerWidth, Y: window.innerHeight, Width: window.outerWidth, Height: window.outerHeight });
                 break;
             case REQUEST.IS_END_OF_PAGE:
@@ -3271,13 +3263,15 @@ class Messaging {
                 }
                 try {
                     const overflow = getComputedStyle(document.documentElement).overflow;
+                    // The page's full height is documentElement's; body can be shorter. Scroll positions can be
+                    // fractional, so the bottom counts within 1px, the same as GPAL's Selenium check.
                     if (overflow !== 'hidden') {
-                        sendResponse((window.innerHeight + window.scrollY) >= document.body.scrollHeight);
+                        sendResponse((window.innerHeight + window.scrollY) >= document.documentElement.scrollHeight - 1);
                     } else {
                         const scrollable = Array.from(document.querySelectorAll('*')).find(
                             el => el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY !== 'hidden'
-                        ) || document.body;
-                        sendResponse((scrollable.clientHeight + scrollable.scrollTop) > scrollable.scrollHeight);
+                        ) || document.documentElement;
+                        sendResponse((scrollable.clientHeight + scrollable.scrollTop) >= scrollable.scrollHeight - 1);
                     }
                 } catch {
                     sendResponse(false);
@@ -3312,7 +3306,7 @@ class Messaging {
                 var cssElement = getCssElement(request.css);
                 if (null != cssElement) {
                         Globals.LogMessage(`[${request.message}]: frame [${Globals.currentContentID}] returning [1] elements`)
-                    const isUnique = elementSearchRoot.querySelectorAll(request.css).length === 1;
+                    const isUnique = elementSearchRoot.querySelectorAll(request.css).length === 1 && !(elementSearchRoot instanceof Element);
                     sendResponse(createGPALElementJson(cssElement, isUnique ? request.css : null));
                 } else if (Globals.closedShadowHost) {
                     // Target lives inside a closed shadow root we can't pierce; the
@@ -3329,7 +3323,9 @@ class Messaging {
             case REQUEST.QUERY_SELECTORS:
                 const cssNodeList = elementSearchRoot.querySelectorAll(request.css);
                 const cssElements = Array.from(cssNodeList).filter(el => el != null);
-                const overrideCss = cssElements.length === 1 ? request.css : null;
+                // The asked-for css names the one match only from where it was asked. Searching inside an element
+                // (switch-to-element), it names something else from the document, so the element's own css is used.
+                const overrideCss = cssElements.length === 1 && !(elementSearchRoot instanceof Element) ? request.css : null;
                 const gpalElements = cssElements.map(el => createGPALElementJson(el, overrideCss));
 
                 if (0 < gpalElements.length) {
@@ -4201,100 +4197,74 @@ function sendToPopup(command) {
 function isNullEmptyOrWhitespace(str) {
     return str === null || str === undefined || (typeof str === 'string' && str.trim().length === 0);
 }
-// set the referrer header used by stealth-, set- or clear-referrer
-let activeReferrerListener = null;
-// set the User-Agent header used by set-useragent
-let activeUserAgentListener = null;
+// the stealth referrer makes the first page the workflow goes to look like a click from a google search, and an
+// override-referrer gives the next page the workflow goes to the referrer it asked for. the header
+// goes on that page's own request only, not on its iframes or anything it loads, and comes off once that navigation
+// commits. a session rule on chromium, so it never outlives the browser the way a dynamic rule would
+const ONE_NAVIGATION_REFERRER_RULE = 2;
+let oneNavigationReferrerListener = null;
+let oneNavigationReferrerCommitted = null;
 
-function setReferrerRule(referrerUrl) {
+async function setOneNavigationReferrer(referrerUrl) {
     const isFirefox = typeof browser !== "undefined" && navigator.userAgent.includes("Firefox");
 
-    // Remove any existing listeners/rules first
-    if (isFirefox && activeReferrerListener) {
-        BROWSER.webRequest.onBeforeSendHeaders.removeListener(activeReferrerListener);
-        activeReferrerListener = null;
-    } else if (!isFirefox) {
-        BROWSER.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1] });
+    await endOneNavigationReferrer();
+
+    if (isFirefox) {
+        oneNavigationReferrerListener = (details) => {
+            const headers = details.requestHeaders.filter(h => h.name.toLowerCase() !== "referer");
+            headers.push({ name: "Referer", value: referrerUrl });
+            return { requestHeaders: headers };
+        };
+        BROWSER.webRequest.onBeforeSendHeaders.addListener(
+            oneNavigationReferrerListener,
+            { urls: ["<all_urls>"], types: ["main_frame"] },
+            ["blocking", "requestHeaders"]
+        );
+    } else {
+        await BROWSER.declarativeNetRequest.updateSessionRules({
+            addRules: [{
+                id: ONE_NAVIGATION_REFERRER_RULE,
+                priority: 2,
+                action: {
+                    type: "modifyHeaders",
+                    requestHeaders: [{ header: "Referer", operation: "set", value: referrerUrl }]
+                },
+                condition: { urlFilter: "*", resourceTypes: ["main_frame"] }
+            }],
+            removeRuleIds: [ONE_NAVIGATION_REFERRER_RULE]
+        });
     }
 
-    if (isNullEmptyOrWhitespace(referrerUrl)) {
-        // Clear Referer header
-        if (isFirefox) {
-            activeReferrerListener = (details) => {
-                // Remove Referer header entirely
-                const filteredHeaders = details.requestHeaders.filter(h => h.name.toLowerCase() !== "referer");
-                return { requestHeaders: filteredHeaders };
-            };
-            BROWSER.webRequest.onBeforeSendHeaders.addListener(
-                activeReferrerListener,
-                { urls: ["<all_urls>"] },
-                ["blocking", "requestHeaders"]
-            );
-        } else {
-            BROWSER.declarativeNetRequest.updateDynamicRules({
-                addRules: [{
-                    id: 1,
-                    priority: 1,
-                    action: {
-                        type: "modifyHeaders",
-                        requestHeaders: [{
-                            header: "Referer",
-                            operation: "remove"
-                        }]
-                    },
-                    condition: {
-                        urlFilter: "*",
-                        resourceTypes: ["main_frame", "sub_frame"]
-                    }
-                }],
-                removeRuleIds: [1]
-            });
+    // the blank page the browser opens on commits too, so only a web page ends it. redirects come before the commit
+    // and keep the header, as a real click's do
+    oneNavigationReferrerCommitted = (details) => {
+        if (0 === details.frameId && /^https?:/i.test(details.url))
+            endOneNavigationReferrer();
+    };
+    BROWSER.webNavigation.onCommitted.addListener(oneNavigationReferrerCommitted);
+}
+
+async function endOneNavigationReferrer() {
+    const isFirefox = typeof browser !== "undefined" && navigator.userAgent.includes("Firefox");
+
+    if (oneNavigationReferrerCommitted) {
+        try { BROWSER.webNavigation.onCommitted.removeListener(oneNavigationReferrerCommitted); } catch (e) { void e; }
+        oneNavigationReferrerCommitted = null;
+    }
+
+    if (isFirefox) {
+        if (oneNavigationReferrerListener) {
+            try { BROWSER.webRequest.onBeforeSendHeaders.removeListener(oneNavigationReferrerListener); } catch (e) { void e; }
+            oneNavigationReferrerListener = null;
         }
     } else {
-        // Set Referer header to referrerUrl
-        if (isFirefox) {
-            activeReferrerListener = (details) => {
-                let found = false;
-                for (const header of details.requestHeaders) {
-                    if (header.name.toLowerCase() === "referer") {
-                        header.value = referrerUrl;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    details.requestHeaders.push({ name: "Referer", value: referrerUrl });
-                }
-                return { requestHeaders: details.requestHeaders };
-            };
-            BROWSER.webRequest.onBeforeSendHeaders.addListener(
-                activeReferrerListener,
-                { urls: ["<all_urls>"] },
-                ["blocking", "requestHeaders"]
-            );
-        } else {
-            BROWSER.declarativeNetRequest.updateDynamicRules({
-                addRules: [{
-                    id: 1,
-                    priority: 1,
-                    action: {
-                        type: "modifyHeaders",
-                        requestHeaders: [{
-                            header: "Referer",
-                            operation: "set",
-                            value: referrerUrl
-                        }]
-                    },
-                    condition: {
-                        urlFilter: "*",
-                        resourceTypes: ["main_frame", "sub_frame"]
-                    }
-                }],
-                removeRuleIds: [1]
-            });
-        }
+        try { await BROWSER.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ONE_NAVIGATION_REFERRER_RULE] }); } catch (e) { void e; }
     }
 }
+
+// set the User-Agent header used by set-useragent
+let activeUserAgentListener = null;
 
 function setUserAgentRule(userAgent) {
     const isFirefox = typeof browser !== "undefined" && navigator.userAgent.includes("Firefox");
@@ -4373,8 +4343,13 @@ function checkTabIdleStatus(tabId, timeoutMs = 500, maxConnections = 0, pruneMs 
                     resolve(tracker.consensus ? "idle" : "busy");
                 }
             },
+            // The page took the message and did not answer: its check failed or it is too busy to answer, so busy. A
+            // page with no content script to take it (chrome://, the pdf viewer) fails the send instead, below, and
+            // stays idle, since there is nothing there to wait on.
             timeoutId: setTimeout(() => {
                     Globals.LogMessage(`Idle check timeout: Received ${tracker.numberOfResponses} responses for messageId=${messageId}`);
+                if (0 === tracker.numberOfResponses)
+                    tracker.consensus = false;
                 tracker.resolve();
             }, timeoutMs),
             consensus: true,
@@ -4675,6 +4650,89 @@ function formatLogTimestamp() {
     );
 }
 
+// Neither log ever keeps more than this many entries, whatever auditMaxEntries says, so storage and memory
+// cannot grow without bound however long the extension runs.
+const LOG_HARD_LIMIT = 999;
+
+// The most entries at the end of the audit log one write can change: a repeat collapse rewrites up to two runs of
+// AUDIT_MAX_CYCLE entries plus the counted row.
+const LOG_TAIL_REWRITE = 9;
+
+/* One log, kept as one storage key per entry ("audit.12" is the 12th entry ever written), so a write stores only
+   what it changed, whatever the log's length. storage.local.set replaces a key whole, which is why the logs no
+   longer live inside persistence: there, every entry re-saved the whole log and everything else with it, and
+   each request got slower as the log grew. The background keeps the entries in memory for repeat suppression
+   and trimming; only the background writes. */
+class StoredLog {
+    constructor(prefix) {
+        this.prefix = prefix;      // "audit." or "error."
+        this.entries = [];
+        this.first = 0;            // the key number of entries[0]
+        this.loaded = null;
+    }
+
+    // Reads what an earlier run of the background left, once, before the first write.
+    load() {
+        this.loaded ??= BROWSER.storage.local.get(null).then(all => {
+            const numbers = Object.keys(all)
+                .filter(key => key.startsWith(this.prefix))
+                .map(key => Number(key.slice(this.prefix.length)))
+                .sort((a, b) => a - b);
+
+            this.first = numbers.length ? numbers[0] : 0;
+            this.entries = numbers.map(n => all[this.prefix + n]);
+        });
+        return this.loaded;
+    }
+
+    // Stores the end of the log after the caller added to it or changed its last entries: drops the oldest past
+    // the limit, rewrites the last LOG_TAIL_REWRITE entries, and removes keys past an end that got shorter.
+    save(lengthBefore) {
+        const keep = Math.min(persistence.settings.auditMaxEntries, LOG_HARD_LIMIT);
+        const removeKeys = [];
+        const setKeys = {};
+
+        for (let i = this.entries.length; i < lengthBefore; i++)
+            removeKeys.push(this.prefix + (this.first + i));
+
+        if (this.entries.length > keep) {
+            const drop = this.entries.length - keep;
+
+            for (let i = 0; i < drop; i++)
+                removeKeys.push(this.prefix + (this.first + i));
+            this.entries.splice(0, drop);
+            this.first += drop;
+        }
+
+        for (let i = Math.max(0, this.entries.length - LOG_TAIL_REWRITE); i < this.entries.length; i++)
+            setKeys[this.prefix + (this.first + i)] = this.entries[i];
+
+        if (removeKeys.length)
+            BROWSER.storage.local.remove(removeKeys);
+        BROWSER.storage.local.set(setKeys);
+    }
+
+    // Removes every key with this prefix in storage, which is what the popup shows, not only the ones in memory
+    clear() {
+        this.entries = [];
+        this.first = 0;
+        return BROWSER.storage.local.get(null).then(all =>
+            BROWSER.storage.local.remove(Object.keys(all).filter(key => key.startsWith(this.prefix))));
+    }
+}
+
+const auditLog = new StoredLog("audit.");
+const errorLog = new StoredLog("error.");
+
+// Empties both logs. The background owns them, so the popup asks for this with REQUEST.CLEAR_LOGS.
+async function clearLogs() {
+    await auditLog.load();
+    await errorLog.load();
+    auditCycle = null;
+    await auditLog.clear();
+    await errorLog.clear();
+}
+
 // Runs only in the background (content forwards errors via REQUEST.LOG_ERROR).
 async function logError(err) {
     // lineno/colno are frequently 0 in service-worker and content error events;
@@ -4689,10 +4747,28 @@ async function logError(err) {
         timestamp: formatLogTimestamp(),
     };
 
+    // An error can come before persistence has loaded, or after loading it failed; the log's limit is a setting,
+    // so it goes to the console then.
+    if (!persistence) {
+        console.warn('error before persistence loaded:', entry);
+        return;
+    }
+
+    // A page or the popup has its own copy of the log and would number its entries over the background's. Pages
+    // forward their errors with REQUEST.LOG_ERROR; what still lands here outside the background is a failure to
+    // reach the background, so it goes to the console.
+    if (true !== Globals.inBackground) {
+        console.warn('error outside the background:', entry);
+        return;
+    }
+
     try {
-        if (!persistence.errorLog) persistence.errorLog = [];
-        persistence.errorLog.push(entry);
-        Persistence.savePersistence();
+        await errorLog.load();
+        const lengthBefore = errorLog.entries.length;
+
+        errorLog.entries.push(entry);
+        errorLog.save(lengthBefore);
+        Globals.LogMessage('error log:', entry);
     } catch (e) {
         console.warn('saving Error log failed:', e);
     }
@@ -4786,8 +4862,9 @@ async function logAuditTrail(source, target, message) {
     };
 
     try {
-        if (!persistence.auditLog) persistence.auditLog = [];
-        const log = persistence.auditLog;
+        await auditLog.load();
+        const log = auditLog.entries;
+        const lengthBefore = log.length;
 
         if (auditCycle && !auditCycleIntact(log))
             auditCycle = null;
@@ -4803,8 +4880,8 @@ async function logAuditTrail(source, target, message) {
                     const marker = log[log.length - 1];
                     marker.message = auditSuppressText(auditCycle);
                     marker.timestamp = entry.timestamp;
+                    auditLog.save(lengthBefore);
                 }
-                Persistence.savePersistence();
                 return;
             }
             log.push(...auditCycle.pending);   // broke mid-cycle: those entries did happen, so keep them
@@ -4813,8 +4890,8 @@ async function logAuditTrail(source, target, message) {
 
         log.push(entry);
         auditCycle = detectAuditCycle(log);
-
-        Persistence.savePersistence();
+        auditLog.save(lengthBefore);
+        Globals.LogMessage('audit log:', entry);
     } catch (err) {
         console.warn('Audit trail log failed:', err);
     }

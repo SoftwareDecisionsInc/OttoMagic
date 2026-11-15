@@ -376,20 +376,20 @@ class Messaging {
                 retval = false;
                 break;
             case REQUEST.CLOSE_WINDOW: { // TEST: no parameter version
-                // Answers the window left active as { windowId, url }, as open-window and get-current-window do.
+                // Answers the window left active as { windowId, url, tabId }, as open-window and get-current-window do.
                 // Closing the last window takes this extension down with it, so then the answer goes first and
                 // names no window.
                 const closeAndAnswer = (windowId) => {
                     BROWSER.windows.getAll({}, (windows) => {
                         if (windows.length <= 1) {
-                            sendToNativeAppFromBackground({ windowId: null, url: null });
+                            sendToNativeAppFromBackground({ windowId: null, url: null, tabId: null });
                             BROWSER.windows.remove(windowId);
                             return;
                         }
                         BROWSER.windows.remove(windowId, () => {
                             BROWSER.windows.getLastFocused({ populate: true }, (win) => {
                                 const tab = win.tabs.find(t => t.active);
-                                sendToNativeAppFromBackground({ windowId: win.id, url: tab ? tab.url : null });
+                                sendToNativeAppFromBackground({ windowId: win.id, url: tab ? tab.url : null, tabId: tab ? tab.id : null });
                             });
                         });
                     });
@@ -984,9 +984,9 @@ class Messaging {
                 break;
             case REQUEST.GET_CURRENT_WINDOW:
                 BROWSER.windows.getCurrent(function (window) {
-                    BROWSER.tabs.query({ active: true }, function (tabs) {
+                    BROWSER.tabs.query({ active: true, windowId: window.id }, function (tabs) {
                         if (tabs.length > 0) {
-                            sendToNativeAppFromBackground({ windowId: window.id, url: tabs[0].url });
+                            sendToNativeAppFromBackground({ windowId: window.id, url: tabs[0].url, tabId: tabs[0].id });
                         }
                         else
                             sendToNativeAppFromBackground('NOTOK');
@@ -2035,9 +2035,12 @@ class Messaging {
                 // Switching windows/tabs -- reset the frame target to the main frame.
                 Globals.activeFrameId = 0;
                 if (request.data.windowId) {
+                    // a window has no url of its own, so the answer is its active tab's url and id
                     BROWSER.windows.update(request.data.windowId, { focused: true }, (win) => {
-                        sendToNativeAppFromBackground({ windowId: win.id, url: win.url }, true);
-                        return;
+                        BROWSER.tabs.query({ active: true, windowId: win.id }, (tabs) => {
+                            const tab = tabs.length > 0 ? tabs[0] : null;
+                            sendToNativeAppFromBackground({ windowId: win.id, url: tab ? tab.url : null, tabId: tab ? tab.id : null }, true);
+                        });
                     });
                 }
                 else if (request.data.url) {
@@ -2061,7 +2064,7 @@ class Messaging {
                         // and every request after this acts on the active tab
                         BROWSER.tabs.update(match.tab.id, { active: true }, () => {
                             BROWSER.windows.update(match.window.id, { focused: true }, (win) => {
-                                sendToNativeAppFromBackground({ windowId: win.id, url: match.tab.url }, true);
+                                sendToNativeAppFromBackground({ windowId: win.id, url: match.tab.url, tabId: match.tab.id }, true);
                             });
                         });
                     });
@@ -2308,8 +2311,13 @@ class Messaging {
                         const nextIndex = (currentIndex + 1) % sortedWindows.length;
                         const nextWindow = sortedWindows[nextIndex];
 
-                        BROWSER.windows.update(nextWindow.id, { focused: true });
-                        sendToNativeAppFromBackground(nextWindow.id);
+                        // answers { windowId, url, tabId } of the window's active tab, as open-window does
+                        BROWSER.windows.update(nextWindow.id, { focused: true }, () => {
+                            BROWSER.tabs.query({ active: true, windowId: nextWindow.id }, (tabs) => {
+                                const tab = tabs.length > 0 ? tabs[0] : null;
+                                sendToNativeAppFromBackground({ windowId: nextWindow.id, url: tab ? tab.url : null, tabId: tab ? tab.id : null });
+                            });
+                        });
                     });
                 });
                 break;
@@ -2319,7 +2327,7 @@ class Messaging {
                     sendToNativeAppFromBackground('OK');
                 });
                 break;
-            case REQUEST.OPEN_WINDOW: //TEST: empty request ALSO TODO: Callback function return gives old window, not the newly created one
+            case REQUEST.OPEN_WINDOW: //TEST: empty request
                 var newURL = 'about:blank';
                 if (request.data && request.data.url) {
                     newURL = ensureHttps(request.data.url);
@@ -2334,10 +2342,11 @@ class Messaging {
                     focused: true, // Optional: whether the new window should be focused
                     incognito: false // Optional: whether the new window should be an incognito window
                 }, function (newWindow) {
-                    // Callback function executed after the window is created
-                    BROWSER.tabs.query({ active: true }, function (tabs) { //TODO: Window ID return is accurate, tab query is incorrect
+                    // the new window's own tab, asked by window: active alone answers a tab of any window
+                    BROWSER.tabs.query({ active: true, windowId: newWindow.id }, function (tabs) {
                         if (tabs.length > 0) {
-                            sendToNativeAppFromBackground({ windowId: newWindow.id, url: tabs[0].url });
+                            // Chrome holds a url not yet loaded in pendingUrl and reports url as empty until it loads
+                            sendToNativeAppFromBackground({ windowId: newWindow.id, url: tabs[0].url || tabs[0].pendingUrl, tabId: tabs[0].id });
                         }
                         else
                             sendToNativeAppFromBackground('NOTOK');
@@ -2515,8 +2524,13 @@ class Messaging {
                         const prevIndex = (currentIndex - 1 + sortedWindows.length) % sortedWindows.length;
                         const prevWindow = sortedWindows[prevIndex];
 
-                        BROWSER.windows.update(prevWindow.id, { focused: true });
-                        sendToNativeAppFromBackground(prevWindow.id);
+                        // answers { windowId, url, tabId } of the window's active tab, as open-window does
+                        BROWSER.windows.update(prevWindow.id, { focused: true }, () => {
+                            BROWSER.tabs.query({ active: true, windowId: prevWindow.id }, (tabs) => {
+                                const tab = tabs.length > 0 ? tabs[0] : null;
+                                sendToNativeAppFromBackground({ windowId: prevWindow.id, url: tab ? tab.url : null, tabId: tab ? tab.id : null });
+                            });
+                        });
                     });
                 });
                 break;
@@ -3403,32 +3417,112 @@ class Messaging {
 
                 sendResponse(success ? "OK" : "NOTOK");
                 break;
-            case REQUEST.SEND_STRING:
-                var tempText = request.text;
-                if (modifiersHeld.Shift) { tempText = toUpperCase(request.text); }
-                var typingDelay = request.typingDelay || 0;
+            case REQUEST.SEND_STRING: {
+                // types at the cursor of whatever has focus, the way a keyboard does
+                const TEXT_TYPES = ['text', 'search', 'email', 'password', 'tel', 'url', 'number',
+                    'date', 'datetime-local', 'month', 'time', 'week'];
+
+                // the focused element, asked again for every key so a page that moves focus is followed. a shadow root
+                // or a same-origin frame reports only its host, so follow them down to the element itself
+                const findFocus = () => {
+                    let el = document.activeElement;
+
+                    while (el && ((el.shadowRoot && el.shadowRoot.activeElement) || ('IFRAME' === el.tagName && el.contentDocument)))
+                        el = el.shadowRoot && el.shadowRoot.activeElement ? el.shadowRoot.activeElement : el.contentDocument.activeElement;
+
+                    const isField = !!el && ('TEXTAREA' === el.tagName || ('INPUT' === el.tagName && TEXT_TYPES.includes(el.type)));
+
+                    return {
+                        el: el,
+                        isField: isField,
+                        editable: !!el && !el.disabled && !el.readOnly && (isField || true === el.isContentEditable),
+                        keyTarget: el ? (el !== el.ownerDocument.body ? el : el.ownerDocument) : document
+                    };
+                };
+
+                // execCommand inserts at the cursor, replaces a selection and fires input the way typing does. a
+                // field it refuses, date or time, gets the text spliced in through the native value setter
+                const insert = (focus, text) => {
+                    const el = focus.el;
+                    let inserted = el.ownerDocument.execCommand('insertText', false, text);
+
+                    if (!inserted && focus.isField) {
+                        const view = el.ownerDocument.defaultView;
+                        const proto = 'TEXTAREA' === el.tagName ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
+                        const current = el.value || '';
+                        let start = current.length;
+                        let end = current.length;
+
+                        // date and time inputs have no cursor, and older Chromium throws on the ask
+                        try {
+                            if ('number' === typeof el.selectionStart) {
+                                start = el.selectionStart;
+                                end = el.selectionEnd;
+                            }
+                        } catch (e) { }
+
+                        Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, current.slice(0, start) + text + current.slice(end));
+                        el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
+                        inserted = true;
+                    }
+
+                    return inserted;
+                };
+
+                // one key: keydown, keypress, the character, keyup. a page that cancels the keydown gets no character,
+                // and with Control or Alt held the key is a shortcut, not a character, as with a real keyboard
+                const typeOne = (char) => {
+                    const focus = findFocus();
+                    const init = {
+                        key: '\n' === char ? 'Enter' : ('\t' === char ? 'Tab' : char),
+                        bubbles: true,
+                        cancelable: true,
+                        composed: true,
+                        ctrlKey: modifiersHeld.Control,
+                        shiftKey: modifiersHeld.Shift,
+                        altKey: modifiersHeld.Alt
+                    };
+                    let landed = true;
+
+                    if (focus.keyTarget.dispatchEvent(new KeyboardEvent('keydown', init))) {
+                        focus.keyTarget.dispatchEvent(new KeyboardEvent('keypress', init));
+                        if (focus.editable && !modifiersHeld.Control && !modifiersHeld.Alt)
+                            landed = insert(focus, char);
+                    }
+
+                    focus.keyTarget.dispatchEvent(new KeyboardEvent('keyup', init));
+                    return landed;
+                };
+
+                const typed = (modifiersHeld.Shift ? request.text.toUpperCase() : request.text).replace(/\r\n/g, '\n');
+                const typingDelay = request.typingDelay || 0;
+                const focus = findFocus();
+
                 if (0 < typingDelay) {
                     (async () => {
+                        let landed = true;
                         let first = true;
-                        for (let char of request.text) {
+
+                        for (let char of typed) {
                             if (!first) await new Promise(r => setTimeout(r, typingDelay));
-                            document.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-                            document.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true }));
-                            document.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
+                            landed = typeOne(char) && landed;
                             first = false;
                         }
-                        sendResponse("OK");
+
+                        sendResponse(landed ? "OK" : "NOTOK");
                     })();
                     retval = true; // keep message port open for the async sendResponse above
+                } else if (focus.editable && !modifiersHeld.Control && !modifiersHeld.Alt) {
+                    // the whole string in one insert, as Puppeteer's Input.insertText does
+                    sendResponse(insert(focus, typed) ? "OK" : "NOTOK");
                 } else {
-                    for (let char of request.text) {
-                        dispatchResults = document.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-                        dispatchResults = document.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true }));
-                        dispatchResults = document.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
-                    }
+                    // nothing takes text, so only the keys go out, for pages listening for them
+                    for (let char of typed)
+                        typeOne(char);
                     sendResponse("OK");
                 }
                 break;
+            }
             case REQUEST.FETCH:
                 // issued here, in the page, so it goes out on the tab's own connection carrying its cookies, its
                 // TLS fingerprint and its header order. a relative url resolves against wherever the tab is.
@@ -3701,6 +3795,10 @@ class Messaging {
                                 'cursor', 'user-select', 'content', 'filter'
                             ]);
 
+                            // Properties that say whether the element shows or takes clicks keep every value, so
+                            // display none, opacity 0 and pointer-events none reach the visible and clickable checks
+                            const STATE = new Set(['display', 'visibility', 'opacity', 'pointer-events']);
+
                             // 4. Iterate only the properties that exist on the style object
                             for (let i = 0; i < styles.length; i++) {
                                 const prop = styles[i];                  // e.g. "display"
@@ -3709,9 +3807,18 @@ class Messaging {
                                 const value = styles.getPropertyValue(prop).trim(); // "block", "0.5", etc.
 
                                 // Skip empty / default values
-                                if (!value || EMPTY_VALUES.has(value)) { continue; }
+                                if (!value || (!STATE.has(prop) && EMPTY_VALUES.has(value))) { continue; }
 
                                 props[prop] = value;
+                            }
+
+                            // Opacity does not pass down to children, so an ancestor with opacity 0 is reported as
+                            // ancestor-opacity 0, which hides the element too; opacity keeps the element's own value.
+                            // The walk goes through slots and out of shadow roots to their hosts
+                            let opacityNode = element.assignedSlot || element.parentElement || element.getRootNode().host;
+                            while (opacityNode && props['ancestor-opacity'] !== '0') {
+                                if (window.getComputedStyle(opacityNode).getPropertyValue('opacity').trim() === '0') { props['ancestor-opacity'] = '0'; }
+                                opacityNode = opacityNode.assignedSlot || opacityNode.parentElement || opacityNode.getRootNode().host;
                             }
                             sendResponse(props);
                             break;

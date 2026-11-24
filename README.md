@@ -12,7 +12,7 @@ the private OttoMatic browser extension repository. Development happens privatel
 
 ## License
 
-Source available under the **Business Source License 1.1**, with the same Additional Use Grant as GPAL. Full terms:
+Open source under the **Apache License, Version 2.0**, the same as GPAL. Full terms:
 [LICENSE.md](./LICENSE.md). Privacy: [privacy.md](./privacy.md).
 
-Copyright (c) 2026 Software Decisions, Inc. All rights reserved.
+Copyright (c) 2026 Software Decisions, Inc.
